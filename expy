@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# expy — Expose Yourself CLI（精简版：2 命令，纯 bash，无 Python 依赖）
+# 用法: expy <command> [args]
+set -euo pipefail
+
+# ─── 路径（解析 symlink 链，兼容 ln -sf 安装 + 直接调用）────
+# macOS readlink 无 -f，用 while -L 逐层解析 symlink 链
+# @doc https://unix.stackexchange.com/questions/17499/get-path-of-current-script-when-executed-through-a-symlink
+S="$0"
+while [ -L "$S" ]; do # 逐层解析 symlink 链
+  T="$(readlink "$S")" # 读 symlink 目标
+  case "$T" in
+    /*) S="$T" ;; # 绝对路径 → 直接替换
+    *)  S="$(cd "$(dirname "$S")" && pwd)/$T" ;; # 相对路径 → 拼为绝对路径
+  esac
+done
+PROJ_DIR="$(cd "$(dirname "$S")" && pwd)" # 最终脚本所在目录 = ExposeYourself/
+PLUGINS_DIR="$PROJ_DIR/plugins"                         # 插件 UI 部署目录
+# 从 config.yaml 读取端口（python3 一行解析 YAML）
+PORT=$(python3 -c "import yaml; print(yaml.safe_load(open('$PROJ_DIR/config.yaml'))['server']['port'])" 2>/dev/null || echo "9877")
+API="http://localhost:$PORT"                             # API 根地址
+
+# ─── 颜色 ──────────────────────────────────────────────
+if [[ -t 1 ]]; then
+  C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'
+  C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_YELLOW=$'\033[33m'; C_CYAN=$'\033[36m'
+else C_RESET=; C_BOLD=; C_GREEN=; C_RED=; C_YELLOW=; C_CYAN=; fi
+ok()   { echo "${C_GREEN}✓${C_RESET} $*"; }
+warn() { echo "${C_YELLOW}!${C_RESET} $*"; }
+err()  { echo "${C_RED}✗${C_RESET} $*" >&2; }
+info() { echo "${C_CYAN}→${C_RESET} $*"; }
+die()  { err "$*"; exit 1; }
+
+# ─── 帮助 ──────────────────────────────────────────────
+show_help() {
+  echo "${C_BOLD}expy${C_RESET} — Expose Yourself"
+  echo
+  echo "${C_BOLD}命令${C_RESET}"
+  echo "  dashboard [start|stop|restart]   启停控制台（端口从 config.yaml 读取）"
+  echo "  deploy <manifest.json路径>      部署插件：构建UI + 注册到config.yaml"
+  echo "  undeploy <name>                  卸载插件：移除注册 + 删除 UI"
+  echo "  list                             列出所有已注册插件"
+  echo "  doctor                           诊断环境，检查所有依赖是否就绪"
+  echo
+  echo "${C_BOLD}示例${C_RESET}"
+  echo "  expy dashboard"
+  echo "  expy deploy /path/to/plugin/manifest.json"
+  echo "  expy undeploy 1_chat_monitor"
+  echo "  expy list"
+  echo "  expy doctor"
+}
+
+# ─── 工具 ──────────────────────────────────────────────
+
+api_up() { curl -s --connect-timeout 2 "$API/api/manifests" >/dev/null 2>&1; }
+
+# ─── dashboard ─────────────────────────────────────────
+
+cmd_dashboard() {
+  local action="${1:-start}"
+  case "$action" in
+    stop) pkill -f "uvicorn backend.main" 2>/dev/null || true; ok "已停止";; # 杀所有 uvicorn 进程（不限端口）
+    restart) info "重启..."; pkill -f "uvicorn backend.main" 2>/dev/null || true; sleep 1 # 先杀所有旧进程
+      export HERMES_PORT="$PORT" # 供 Vite dev server 读取
+      (cd "$PROJ_DIR" && nohup python3 -m uvicorn backend.main:app --host 0.0.0.0 --port "$PORT" >/dev/null 2>&1 &) # 后台启动 uvicorn
+      for i in 1 2 3 4 5 6; do sleep 1; api_up && { ok "已重启 $API"; open -n -a "Google Chrome" --args --app="$API" 2>/dev/null || true; return; }; done # 重试 6 秒等待启动
+      die "启动失败";;
+    start|"") api_up && { ok "已在运行 $API"; open -n -a "Google Chrome" --args --app="$API" 2>/dev/null || true; return; } # 已运行则直接打开
+      info "启动..."; export HERMES_PORT="$PORT" # 供 Vite dev server 读取
+      (cd "$PROJ_DIR" && nohup python3 -m uvicorn backend.main:app --host 0.0.0.0 --port "$PORT" >/dev/null 2>&1 &) # 后台启动 uvicorn
+      for i in 1 2 3 4 5 6; do sleep 1; api_up && { ok "已启动 $API"; open -n -a "Google Chrome" --args --app="$API" 2>/dev/null || true; return; }; done # 重试 6 秒等待启动
+      die "启动失败";;
+    *) die "用法: expy dashboard [start|stop|restart]";;
+  esac
+}
+
+# ─── doctor ────────────────────────────────────────────
+# 辅助函数：打印分组标题
+section() { echo; echo "  ${C_BOLD}${C_CYAN}$*${C_RESET}"; echo "  ──────────────────────────────────────"; }
+# 辅助函数：检测项（icon label value，用 tab 对齐）
+item()     { printf "  %s %s\t%s\n" "$1" "$2" "$3"; }
+ok_item()  { item "${C_GREEN}✓${C_RESET}" "$1" "$2"; } # 绿色 ✓
+err_item() { item "${C_RED}✗${C_RESET}" "$1" "$2"; }   # 红色 ✗
+warn_item(){ item "${C_YELLOW}!${C_RESET}" "$1" "$2"; } # 黄色 !
+info_item(){ item "${C_CYAN}→${C_RESET}" "$1" "$2"; }   # 青色 →
+
+cmd_doctor() {
+  echo
+  echo "  ${C_BOLD}expy doctor${C_RESET} — 环境诊断"
+  echo "  ══════════════════════════════════════"
+  local all_ok=true
+
+  # ── Python 运行环境 ────────────────────────────────
+  section "Python 运行环境"
+
+  if python3 -m uvicorn --version >/dev/null 2>&1; then
+    ok_item "uvicorn" "$(python3 -m uvicorn --version 2>&1)"
+  else
+    err_item "uvicorn" "未安装 → pip install uvicorn"; all_ok=false
+  fi
+
+  if python3 -c "import yaml" >/dev/null 2>&1; then
+    ok_item "pyyaml" "已安装"
+  else
+    err_item "pyyaml" "未安装 → pip install pyyaml"; all_ok=false
+  fi
+
+  import_out=$(cd "$PROJ_DIR" && python3 -c "
+import sys; sys.path.insert(0, '.')
+try:
+    import backend.main
+    print('OK')
+except Exception as e:
+    print(f'ERR:{e}')
+" 2>&1)
+  if [[ "$import_out" == "OK" ]]; then
+    ok_item "Python 依赖" "所有依赖就绪（fastapi/starlette/...）"
+  else
+    err_item "Python 依赖" "导入失败 → ${import_out#ERR:}"; all_ok=false
+  fi
+
+  # ── 项目文件 ──────────────────────────────────────
+  section "项目文件"
+
+  if [[ -f "$PROJ_DIR/backend/main.py" ]]; then
+    ok_item "项目目录" "backend/main.py 存在"
+  else
+    err_item "项目目录" "backend/main.py 不存在"; all_ok=false
+  fi
+
+  if [[ -f "$PROJ_DIR/frontend/dist/index.html" ]]; then
+    ok_item "前端构建" "已构建"
+  else
+    warn_item "前端构建" "未构建 → cd frontend && npm run build"
+  fi
+
+  # ── 配置文件 ──────────────────────────────────────
+  section "配置文件"
+
+  if [[ -f "$PROJ_DIR/config.yaml" ]]; then
+    port_val=$(python3 -c "import yaml; print(yaml.safe_load(open('$PROJ_DIR/config.yaml'))['server']['port'])" 2>/dev/null || echo "???")
+    ok_item "config.yaml" "存在, 端口: ${port_val:-???}"
+  else
+    err_item "config.yaml" "不存在"; all_ok=false
+  fi
+
+  if lsof -ti:"$PORT" >/dev/null 2>&1; then
+    info_item "端口 $PORT" "已占用 — 服务可能正在运行"
+  else
+    info_item "端口 $PORT" "空闲"
+  fi
+
+  # ── 安全 ──────────────────────────────────────────
+  section "安全"
+
+  if [[ -n "${HERMES_SUDO_PASSWORD:-}" ]]; then
+    ok_item "sudo 密码" "已设置"
+  else
+    warn_item "sudo 密码" "未设置 → 系统级 daemon 将无法使用"
+    echo "       请在 ~/.zshrc 中添加:"
+    echo "         export HERMES_SUDO_PASSWORD=你的Mac登录密码"
+    echo "       然后执行 source ~/.zshrc"
+  fi
+
+  # ── 插件部署 ──────────────────────────────────────
+  section "插件部署"
+
+  if [[ -d "$PLUGINS_DIR" ]]; then
+    count=$(find "$PLUGINS_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "${count:-0}" -gt 0 ]]; then
+      ok_item "已部署" "$count 个"
+      find "$PLUGINS_DIR" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | while read -r d; do
+        echo "         $(basename "$d")/"
+      done
+    else
+      warn_item "已部署" "无 → expy deploy <manifest.json路径>"
+    fi
+  else
+    warn_item "已部署" "plugins/ 目录不存在"
+  fi
+
+  # ── 结论 ──────────────────────────────────────────
+  echo
+  echo "  ══════════════════════════════════════"
+  if $all_ok; then
+    ok_item "结论" "所有关键项检查通过"
+  else
+    err_item "结论" "存在关键问题，请修复后再启动"
+  fi
+  echo
+}
+
+# ─── deploy ────────────────────────────────────────────
+
+cmd_deploy() {
+  local manifest_path="${1:-}" # manifest.json 的绝对路径
+  [[ -n "$manifest_path" ]] || die "用法: expy deploy <manifest.json路径>"
+  [[ -f "$manifest_path" ]] || die "manifest.json 不存在: $manifest_path"
+
+  # ① 读 manifest 基本信息
+  local name ui_entry plugin_dir
+  name=$(python3 -c "import json; print(json.load(open('$manifest_path')).get('name',''))" 2>/dev/null || echo "") # 取 name 字段
+  [[ -n "$name" ]] || die "manifest.json 缺少 name 字段"
+  ui_entry=$(python3 -c "import json; print(json.load(open('$manifest_path')).get('ui',{}).get('entry',''))" 2>/dev/null || echo "") # 取 ui.entry
+  plugin_dir=$(cd "$(dirname "$manifest_path")" && pwd) # manifest.json 所在目录 = 插件根目录
+
+  # ② 如果有 ui → 构建前端
+  if [[ -n "$ui_entry" ]]; then
+    local ui_dir="$plugin_dir/ui" # ui 源码目录
+    [[ -d "$ui_dir" ]] || die "ui 目录不存在: $ui_dir"
+    [[ -f "$ui_dir/package.json" ]] || die "ui/package.json 不存在: $ui_dir/package.json"
+
+    info "构建 $name 前端..."
+    (cd "$ui_dir" && npm run build) || die "npm run build 失败（查看上方错误输出）"
+
+    # 复制 dist → plugins/<name>/
+    local dist_dir="$ui_dir/dist"
+    [[ -d "$dist_dir" ]] || die "dist 目录不存在: $dist_dir（npm run build 可能未生成 dist）"
+    mkdir -p "$PLUGINS_DIR/$name"
+    rm -rf "${PLUGINS_DIR:?}/$name"/*
+    cp -R "$dist_dir/." "$PLUGINS_DIR/$name/"
+    ok "UI 已构建 → plugins/$name/"
+  fi
+
+  # ③ 写入 config.yaml plugin_paths（去重）
+  info "注册插件到 config.yaml..."
+  local added
+  added=$(python3 -c "
+import yaml, sys
+cfg_path = '$PROJ_DIR/config.yaml'
+with open(cfg_path) as f:
+    cfg = yaml.safe_load(f)
+paths = cfg.get('plugin_paths', [])
+plugin_dir = '$plugin_dir'
+if plugin_dir not in paths:
+    paths.append(plugin_dir)
+    cfg['plugin_paths'] = paths
+    with open(cfg_path, 'w') as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    print('added')
+else:
+    print('exists')
+" 2>&1) || die "写入 config.yaml 失败"
+  if [[ "$added" == "added" ]]; then
+    ok "已注册 → plugin_paths"
+  else
+    info "已在 plugin_paths 中，跳过"
+  fi
+
+  # ④ 完成
+  ok "插件 $name 部署完成"
+  info "执行 expy dashboard restart 生效"
+}
+
+# ─── list ──────────────────────────────────────────────
+
+cmd_list() {
+  info "已注册插件："
+  python3 -c "
+import yaml, json, os
+with open('$PROJ_DIR/config.yaml') as f:
+    cfg = yaml.safe_load(f)
+paths = cfg.get('plugin_paths', [])
+if not paths:
+    print('  （无）')
+else:
+    for p in paths:
+        mf = os.path.join(p, 'manifest.json')
+        name = '?'
+        if os.path.isfile(mf):
+            try:
+                with open(mf) as f2:
+                    name = json.load(f2).get('name', '?')
+            except: pass
+        print(f'  {name}  ----  {p}')
+" 2>&1
+}
+
+# ─── undeploy ──────────────────────────────────────────
+
+cmd_undeploy() {
+  local name="${1:-}" # 插件名
+  [[ -n "$name" ]] || die "用法: expy undeploy <name>"
+
+  info "卸载 $name..."
+
+  # ① 从 config.yaml plugin_paths 中移除
+  local found
+  found=$(python3 -c "
+import yaml, json, os
+cfg_path = '$PROJ_DIR/config.yaml'
+with open(cfg_path) as f:
+    cfg = yaml.safe_load(f)
+paths = cfg.get('plugin_paths', [])
+target = ''
+for p in paths:
+    mf = os.path.join(p, 'manifest.json')
+    if os.path.isfile(mf):
+        try:
+            with open(mf) as f2:
+                n = json.load(f2).get('name', '')
+            if n == '$name':
+                target = p
+                break
+        except: pass
+if target:
+    paths.remove(target)
+    cfg['plugin_paths'] = paths
+    with open(cfg_path, 'w') as f:
+        yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+    print(target)
+else:
+    print('')
+" 2>&1) || die "读取 config.yaml 失败"
+
+  if [[ -z "$found" ]]; then
+    die "插件 $name 未在 plugin_paths 中找到"
+  fi
+  ok "已从 plugin_paths 移除"
+
+  # ② 删除 plugins/<name>/ UI
+  if [[ -d "$PLUGINS_DIR/$name" ]]; then
+    info "删除 plugins/$name/ ..."
+    rm -rf "$PLUGINS_DIR/$name"
+    ok "plugins/$name/ 已删除"
+  fi
+
+  # ③ 完成
+  ok "插件 $name 卸载完成"
+  info "执行 expy dashboard restart 生效"
+}
+
+# ─── 路由 ──────────────────────────────────────────────
+
+main() {
+  local cmd="${1:-help}"; shift || true
+  case "$cmd" in
+    help|--help|-h) show_help;;
+    dashboard) cmd_dashboard "${1:-start}";;
+    deploy) cmd_deploy "${1:-}";;
+    undeploy) cmd_undeploy "${1:-}";;
+    list) cmd_list;;
+    doctor) cmd_doctor;;
+    *) err "未知命令: $cmd"; show_help; exit 1;;
+  esac
+}
+
+main "$@"

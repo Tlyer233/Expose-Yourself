@@ -1,0 +1,20 @@
+# 开发文档
+ref/
+
+# 配置文件（含本地路径，用 config.example.yaml 作为模板）
+config.yaml
+
+# 构建产物
+frontend/dist/
+plugins/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+
+# Node
+node_modules/
