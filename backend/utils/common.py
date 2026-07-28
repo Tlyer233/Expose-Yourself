@@ -1,6 +1,5 @@
 """
-后端公共工具
-被 daemon.py / logs.py / skills.py 共享的通用函数
+后端公共工具 — daemon.py / logs.py / skills.py / plugin_loader.py 共享的通用函数
 """
 import json  # 读取 manifest.json
 import os  # 路径操作
@@ -30,3 +29,25 @@ def find_manifest(name: str) -> dict | None:
         except Exception:  # JSON 格式错误
             pass  # 跳过
     return None  # 找不到
+
+
+def load_all_manifests() -> list[dict]:
+    """
+    从 config.yaml plugin_paths 加载所有已注册插件的 manifest
+    @returns manifest 列表（每项含 _dir 字段记录插件目录）
+    """
+    from config import PLUGIN_PATHS  # 延迟导入避免循环依赖
+
+    manifests = []  # 收集结果
+    for plugin_dir in PLUGIN_PATHS:  # 遍历已注册的插件目录
+        mf = os.path.join(plugin_dir, 'manifest.json')  # 拼 manifest 路径
+        if not os.path.isfile(mf):  # 不存在跳过
+            continue
+        try:  # 读 + 解 JSON
+            with open(mf) as f:
+                m = json.load(f)
+            m['_dir'] = plugin_dir  # 记录插件目录（壳子内部用）
+            manifests.append(m)  # 加入列表
+        except Exception:  # JSON 损坏跳过
+            pass
+    return manifests  # 返回列表

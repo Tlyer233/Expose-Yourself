@@ -23,10 +23,11 @@ from fastapi.middleware.cors import CORSMiddleware  # 跨域中间件（对应 S
 from fastapi.staticfiles import StaticFiles  # 静态文件服务（对应 spring.web.resources.static-locations）
 from fastapi.responses import FileResponse, JSONResponse  # 文件响应 + JSON 响应（SPA fallback 用）
 from config import SERVER_HOST, SERVER_PORT, FRONTEND_DIST, PLUGINS_DIR  # 配置常量
-from routers.daemon import router as daemon_router, _load_manifests  # daemon 管理路由 + manifest 扫描
+from routers.daemon import router as daemon_router  # daemon 管理路由
 from routers.logs import router as logs_router  # 日志 tail 读取路由（步骤 4-2-1）
 from routers.skills import router as skills_router  # Skills 管理路由（步骤 4-5）
 from plugin_loader import load_plugin_routers  # 插件业务 API 动态加载器（步骤 4-4-2）
+from utils.common import load_all_manifests  # 所有 manifest 扫描（daemon.py / plugin_loader 共用）
 
 # ─── 创建 FastAPI 应用实例 ──────────────────────────────
 # 对应 SpringBoot 的 SpringApplication.run(MyApp.class, args)
@@ -60,7 +61,7 @@ app.include_router(skills_router)  # /api/daemon/{name}/skills|skills/action（�
 # ─── 动态挂载插件业务 API ──────────────────────────────
 # 扫描 manifest.api 字段，importlib 加载插件 APIRouter 并 include_router
 # 所有插件业务代码归插件目录，壳子不写业务（步骤 4-4-2）
-load_plugin_routers(app, _load_manifests())
+load_plugin_routers(app, load_all_manifests())
 
 # ─── 插件 UI 静态文件服务 ──────────────────────────────────
 # 对应 Flask: @app.route('/plugins/<plugin_name>/<path:filename>')

@@ -34,7 +34,12 @@ PLUGIN_PATHS = _cfg.get('plugin_paths', [])  # 每个元素是插件根目录的
 SUDO_PASSWORD = os.environ.get('HERMES_SUDO_PASSWORD', '')  # 未设置则为空字符串
 # 注意：如果 SUDO_PASSWORD 为空，executor.run_command(sudo=True) 会返回错误提示
 
+# ─── Python 解释器路径（所有 Daemon 插件共用）─────────
+# 由 config.yaml 的 python_path 字段指定，用于 daemon.py 自动生成 plist
+PYTHON_PATH = _cfg.get('python_path', '/usr/bin/python3')  # 兜底系统 Python
+
 # ─── 派生路径（基于 BASE_DIR 计算，无需配置）──────────
 HERMES_SKILLS_DIR = os.path.expanduser("~/.hermes/skills")  # ~/.hermes/skills/
 PLUGINS_DIR = os.path.join(BASE_DIR, "plugins")  # ExposeYourself/plugins/
+SHELL_DIR = os.path.join(BASE_DIR, "shell")  # ExposeYourself/shell/（插件启动脚本）
 FRONTEND_DIST = os.path.join(BASE_DIR, "frontend", "dist")  # ExposeYourself/frontend/dist/

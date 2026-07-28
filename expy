@@ -247,7 +247,7 @@ else:
     info "已在 plugin_paths 中，跳过"
   fi
 
-  # ④ 完成
+  # ③ 完成
   ok "插件 $name 部署完成"
   info "执行 expy dashboard restart 生效"
 }
@@ -325,7 +325,11 @@ else:
     ok "plugins/$name/ 已删除"
   fi
 
-  # ③ 完成
+  # ③ 通过 API stop 清理 daemon plist（stop 含 bootout + rm plist，且自动处理 sudo）
+  # 服务端可能未运行，--connect-timeout 2s 快速失败不阻塞
+  curl -s --connect-timeout 2 "$API/api/daemon/$name/stop" >/dev/null 2>&1 && ok "已停止 daemon 并清理 plist" || true
+
+  # ④ 完成
   ok "插件 $name 卸载完成"
   info "执行 expy dashboard restart 生效"
 }

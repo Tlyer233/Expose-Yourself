@@ -6,6 +6,10 @@ server:
   host: "0.0.0.0" # 监听地址（0.0.0.0 = 所有网卡）
   port: 9723 # 端口号（大于 1024 不需 sudo）
 
+# Python 解释器路径（所有 Daemon 插件共用，用于自动生成 plist）
+# 获取方式: which python3
+python_path: "/opt/homebrew/bin/python3"
+
 # 插件路径列表（expy deploy 自动维护，无需手写）
 plugin_paths: []
 
